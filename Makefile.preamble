@@ -1,9 +1,13 @@
+GCC = gcc-3.5
+GCCLIBS = -lgcc
+OTHER_PRODUCT_DEPENDS += $(OFILE_DIR)/libgcc.unexport
+
 BEFORE_BUILD += comm-page-symbols
 BEFORE_INSTALL += profile debug
 AFTER_INSTALL  += compat-next compat-bsd copy_plist
 
-PROFILE_BUILD_LIBS := $(foreach LIBS, $(LIBS), $(LIBS)_profile) -lcc_noc++
-DEBUG_BUILD_LIBS := $(foreach LIBS, $(LIBS), $(LIBS)_debug  ) -lcc_noc++
+PROFILE_BUILD_LIBS := $(foreach LIBS, $(LIBS), $(LIBS)_profile) $(GCCLIBS)
+DEBUG_BUILD_LIBS := $(foreach LIBS, $(LIBS), $(LIBS)_debug  ) $(GCCLIBS)
 
 # the _stub.o files need to come first to ensure that they override the default stubs
 OTHER_LIBTOOL_FLAGS = $(OFILE_DIR)/spinlock_stub.o \
@@ -11,7 +15,8 @@ OTHER_LIBTOOL_FLAGS = $(OFILE_DIR)/spinlock_stub.o \
 	$(OFILE_DIR)/spinunlock_stub.o \
 	-L/usr/lib/system -sub_library libmathCommon \
 	-lmathCommon -sectorder __TEXT __text System.order \
-	-segcreate __DATA __commpage $(OFILE_DIR)/CommPageSymbols.o
+	-segcreate __DATA __commpage $(OFILE_DIR)/CommPageSymbols.o \
+	-unexported_symbols_list $(OFILE_DIR)/libgcc.unexport
 
 BSD_LIBS = c info kvm m pthread dbm poll dl rpcsvc
 

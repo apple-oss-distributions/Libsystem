@@ -13,11 +13,10 @@ PROJECTVERSION = 2.8
 PROJECT_TYPE = Library
 
 OTHERLINKED = SystemMath.s spinlock_stub.s spinlocktry_stub.s spinunlock_stub.s
+OTHERLINKEDOFILES = SystemMath.o
 
 OTHERSRCS = GNUmakefile Makefile.preamble Makefile Makefile.postamble \
 	    System.order Info.plist CommPageSymbols.st
-
-OTHERLINKEDOFILES = SystemMath.o
 
 MAKEFILEDIR = $(MAKEFILEPATH)/pb_makefiles
 CURRENTLY_ACTIVE_VERSION = YES
@@ -27,15 +26,23 @@ MAKEFILE = library.make
 NEXTSTEP_INSTALLDIR = $(USRLIBDIR)
 WINDOWS_INSTALLDIR = /Library/Frameworks
 PDO_UNIX_INSTALLDIR = /Library/Frameworks
-LIBS = -lc -ldyld -linfo -lkvm -lm -lmacho\
-       -lnotify -lstreams -lunc -lkeymgr -lpoll -ldl
+LIBS = -lc -lcommonCrypto -ldyldapis -linfo -lm -lmacho\
+       -lnotify -lunc -lkeymgr
+ifneq ($(RC_ARCHS),ppc64)
+LIBS += -lstreams -lkvm -llaunch
+endif
 DEBUG_LIBS = $(LIBS)
 PROF_LIBS = $(LIBS)
 
+ifdef ALTUSRLOCALLIBSYSTEM
+LIBSYS = $(ALTUSRLOCALLIBSYSTEM)
+else
+LIBSYS = $(NEXT_ROOT)/usr/local/lib/system
+endif
 
-LIBRARY_PATHS = -L$(NEXT_ROOT)/usr/local/lib/system
+LIBRARY_PATHS = -L$(LIBSYS)
 NEXTSTEP_PB_CFLAGS = -Wall -Werror -I$(NEXT_ROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
-NEXTSTEP_PB_LDFLAGS = -nostdlib -all_load
+NEXTSTEP_PB_LDFLAGS = -nostdlib -all_load -multi_module -Wl,-search_paths_first
 
 
 NEXTSTEP_OBJCPLUS_COMPILER = /usr/bin/cc
