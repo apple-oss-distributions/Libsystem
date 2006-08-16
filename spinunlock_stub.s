@@ -51,7 +51,7 @@ L__spin_unlock$lazy_ptr:
 L__spin_unlock$stub:
         .indirect_symbol __spin_unlock
         movl    $(_COMM_PAGE_SPINLOCK_UNLOCK), %eax
-        jmp     %eax
+        jmp     *%eax
         nop
         call    LPC$1
 LPC$1:  popl    %eax

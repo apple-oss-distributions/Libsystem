@@ -16,7 +16,7 @@ no_target:
 # time (for the non-dylib files), and then call lipo to create fat files
 # for the three dylibs.
 ##---------------------------------------------------------------------
-ALLARCHS = hppa i386 m68k ppc ppc64 sparc
+ALLARCHS = hppa i386 m68k ppc ppc64 sparc x86_64
 NARCHS = $(words $(RC_ARCHS))
 USRLIB = /usr/lib
 

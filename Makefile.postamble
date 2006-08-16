@@ -60,12 +60,14 @@ comm-page-symbols: spinlock_stub.o spinlocktry_stub.o spinunlock_stub.o CommPage
 
 .SUFFIXES: .st
 
+ALL_ARCHS = i386 ppc ppc64 x86_64
 SEG1ADDR_i386 = 0xffff0000
 SEG1ADDR_ppc = 0xffff8000
 SEG1ADDR_ppc64 = 0xffffffffffff8000
+SEG1ADDR_x86_64 = 0x00007fffffe00000
 SLFS_F_PH = /System/Library/Frameworks/System.framework/PrivateHeaders
 
-$(OFILE_DIR)/%.ppc.o %.ppc.o $(OFILE_DIR)/%.ppc64.o %.ppc64.o $(OFILE_DIR)/%.i386.o %.i386.o: %.st
+$(foreach A,$(ALL_ARCHS),$(OFILE_DIR)/%.$(A).o %.$(A).o): %.st
 	$(CC) -arch $(CURRENT_ARCH) -x assembler-with-cpp \
 	    -I$(SLFS_F_PH)/$(CURRENT_ARCH) \
 	    $(ALL_CFLAGS) -c -o $(OFILE_DIR)/commsym.$(CURRENT_ARCH).o $<

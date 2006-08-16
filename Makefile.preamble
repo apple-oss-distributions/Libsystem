@@ -12,9 +12,11 @@ DEBUG_BUILD_LIBS := $(foreach LIBS, $(LIBS), $(LIBS)_debug  ) $(GCCLIBS)
 OTHER_LIBTOOL_FLAGS = $(OFILE_DIR)/spinlock_stub.o \
 	$(OFILE_DIR)/spinlocktry_stub.o \
 	$(OFILE_DIR)/spinunlock_stub.o \
-	-L/usr/lib/system -sub_library libmathCommon \
-	-lmathCommon -sectorder __TEXT __text System.order \
+	-L/usr/lib/system -sub_library libmathCommon -lmathCommon \
 	-segcreate __DATA __commpage $(OFILE_DIR)/CommPageSymbols.o
+ifndef LP64
+OTHER_LIBTOOL_FLAGS += -sectorder __TEXT __text System.order
+endif
 
 BSD_LIBS = c info kvm m pthread dbm poll dl rpcsvc
 

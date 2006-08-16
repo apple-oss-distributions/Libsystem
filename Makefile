@@ -26,9 +26,13 @@ MAKEFILE = library.make
 NEXTSTEP_INSTALLDIR = $(USRLIBDIR)
 WINDOWS_INSTALLDIR = /Library/Frameworks
 PDO_UNIX_INSTALLDIR = /Library/Frameworks
+
+ifneq ($(filter %64,$(RC_ARCHS)),)
+LP64 = 1
+endif
 LIBS = -lc -lcommonCrypto -ldyldapis -linfo -lm -lmacho\
        -lnotify -lunc -lkeymgr
-ifneq ($(RC_ARCHS),ppc64)
+ifndef LP64
 LIBS += -lstreams -lkvm -llaunch
 endif
 DEBUG_LIBS = $(LIBS)
