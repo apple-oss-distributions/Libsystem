@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 #
-# Copyright (c) 2006-2007 Apple Inc. All rights reserved.
+# Copyright (c) 2006-2007, 2009 Apple Inc. All rights reserved.
 #
 # @APPLE_LICENSE_HEADER_START@
 # 
@@ -67,8 +67,8 @@ sub processLibc {
     my($arch, $dir) = @_;
     local $_;
     my $file = File::Spec->join($dir, 'libc-partial.a');
-    my $f = IO::File->new("nm -g -arch $arch $file |");
-    die "$MyName: nm -g -arch $arch $file: $!\n" unless defined($f);
+    my $f = IO::File->new("$ENV{NM} -g -arch $arch $file |");
+    die "$MyName: $ENV{NM} -g -arch $arch $file: $!\n" unless defined($f);
     while(<$f>) {
 	next unless s/^.* T //;
 	chomp;
@@ -85,7 +85,12 @@ sub readLibcSyscalls {
     local $_;
     my @files = (File::Spec->join($dir, $SyscallBase));
     my $archfile = File::Spec->join($dir, "$SyscallBase.$arch");
-    push(@files, $archfile) if -r $archfile;
+    if(-r $archfile) {
+	push(@files, $archfile);
+    } elsif($arch =~ s/^armv.*/arm/) {
+	$archfile = File::Spec->join($dir, "$SyscallBase.$arch");
+	push(@files, $archfile) if -r $archfile;
+    }
     foreach my $file (@files) {
 	my $f = IO::File->new($file, 'r');
 	die "$MyName: $file: $!\n" unless defined($f);
@@ -161,6 +166,7 @@ while(my($k, $v) = each(%Stub)) {
 my $path = File::Spec->join($OutDir, 'Makefile');
 my $f = IO::File->new($path, 'w');
 die "$MyName: $path: $!\n" unless defined($f);
+print $f ".include <CoreOS/Standard/Commands.mk>\n\n";
 
 ##########################################################################
 # List all the object files
@@ -186,12 +192,12 @@ LIB = libc$sufname.a
 all: \$(LIB)
 
 \$(LIB): \$(OBJS)
-	ar cq \$(.TARGET) `lorder \$(OBJS) | tsort -q`
+	\$(AR) cq \$(.TARGET) `\$(LORDER) \$(OBJS) | tsort -q`
 
 .SUFFIXES: .$suffix
 
 .$suffix.o:
-	mv \$(.IMPSRC) \$(.TARGET)
+	\$(MV) \$(.IMPSRC) \$(.TARGET)
 
 XXX
 
@@ -202,7 +208,7 @@ foreach my $k (sort(keys(%Inv))) {
     my $n = $k;
     $n =~ s/^_//;
     print $f "$n.o: $n.$suffix\n";
-    print $f "\tld -arch $arch -r -keep_private_externs";
+    print $f "\t\$(LD) -arch $arch -r -keep_private_externs";
     foreach my $i (@{$Inv{$k}}) {
 	$_ = $i;
 	s/\$/\$\$/g;
