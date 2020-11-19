@@ -5,24 +5,29 @@ copyfile
 corecrypto
 dispatch
 dyld
+keymgr
+launch
 macho
+quarantine
 removefile
 system_asl
 system_blocks
 system_c
-system_collections
 system_configuration
+system_containermanager
 system_coreservices
 system_darwin
 system_dnssd
+system_featureflags
 system_info
-system_sim_kernel system_kernel
 system_m
 system_malloc
+system_networkextension
 system_notify
-system_sim_platform system_platform
-system_sim_pthread system_pthread
+system_product_info_filter
 system_sandbox
+system_secinit
+system_symptoms
 system_trace
 unwind
 xpc
