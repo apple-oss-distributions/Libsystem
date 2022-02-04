@@ -32,11 +32,13 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <corecrypto/cc_priv.h>
-#include <libc_private.h>
+#include <_libc_init.h>
 #include <pthread.h>
 #include <pthread/private.h>
 #if !TARGET_OS_DRIVERKIT
 #include <dlfcn.h>
+#include <os/variant_private.h>
+#include <os/feature_private.h>
 #endif
 #include <fcntl.h>
 #include <errno.h>
@@ -44,12 +46,17 @@
 #include <_libkernel_init.h> // Must be after voucher_private.h
 #include <malloc_implementation.h>
 
+#if TARGET_OS_DRIVERKIT
+#include <MallocStackLogging/MallocStackLogging.h>
+#endif
+
 #include <mach-o/dyld_priv.h>
 
 // system library initialisers
 extern void mach_init(void);			// from libsystem_kernel.dylib
 extern void __libplatform_init(void *future_use, const char *envp[], const char *apple[], const struct ProgramVars *vars);
 extern void __pthread_init(const struct _libpthread_functions *libpthread_funcs, const char *envp[], const char *apple[], const struct ProgramVars *vars);	// from libsystem_pthread.dylib
+extern void __pthread_late_init(const char *envp[], const char *apple[], const struct ProgramVars *vars);	// from libsystem_pthread.dylib
 extern void __malloc_init(const char *apple[]); // from libsystem_malloc.dylib
 extern void __keymgr_initializer(void);		// from libkeymgr.dylib
 extern void _dyld_initializer(void);		// from libdyld.dylib
@@ -103,11 +110,13 @@ extern char *_dirhelper(int, char *, size_t);
 #endif
 
 // advance decls for below;
-void libSystem_atfork_prepare(void);
-void libSystem_atfork_parent(void);
-void libSystem_atfork_child(void);
+static void libSystem_atfork_prepare(unsigned int flags, ...);
+static void libSystem_atfork_parent(unsigned int flags, ...);
+static void libSystem_atfork_child(unsigned int flags, ...);
 
-#if CURRENT_VARIANT_asan
+__attribute__((__visibility__("default"))) void libSystem_init_after_boot_tasks_4launchd(void);
+
+#if SUPPORT_ASAN
 const char *__asan_default_options(void);
 #endif
 
@@ -158,6 +167,36 @@ enum init_func {
 #define _libSystem_ktrace_init_func(what) \
 	_libSystem_ktrace1(ARIADNE_LIFECYCLE_libsystem_init | DBG_FUNC_NONE, INIT_##what)
 
+
+#if TARGET_OS_DRIVERKIT
+
+__attribute__((weak_import)) void msl_initialize(void);
+
+__attribute__((noinline))
+static struct _malloc_msl_symbols*
+fill_msl_symbols(struct _malloc_msl_symbols *msl_symbols) {
+	if (&msl_initialize == NULL)  {
+		return NULL;
+	}
+	*msl_symbols = (struct _malloc_msl_symbols){
+		.version = 1,
+		.handle_memory_event = &msl_handle_memory_event,
+		.stack_logging_locked = &msl_stack_logging_locked,
+		.fork_prepare = &msl_fork_prepare,
+		.fork_child = &msl_fork_child,
+		.fork_parent = &msl_fork_parent,
+		//stack_logging_mode_type and stack_logging_mode_t are identical
+		.turn_on_stack_logging = (boolean_t (*) (stack_logging_mode_type type))&msl_turn_on_stack_logging,
+		.turn_off_stack_logging = &msl_turn_off_stack_logging,
+		.set_flags_from_environment = &msl_set_flags_from_environment,
+		.initialize = &msl_initialize,
+		.copy_msl_lite_hooks = &msl_copy_msl_lite_hooks,
+	};
+	return msl_symbols;
+}
+#endif
+
+
 // libsyscall_initializer() initializes all of libSystem.dylib
 // <rdar://problem/4892197>
 __attribute__((constructor))
@@ -193,21 +232,13 @@ libSystem_initializer(int argc,
 	};
 
 	static const struct _libc_functions libc_funcs = {
-		.version = 1,
-		.atfork_prepare = libSystem_atfork_prepare,
-		.atfork_parent = libSystem_atfork_parent,
-		.atfork_child = libSystem_atfork_child,
+		.version = 2,
 #if defined(HAVE_SYSTEM_CORESERVICES)
 		.dirhelper = _dirhelper,
 #endif
-	};
-	
-	static const struct _malloc_functions malloc_funcs = {
-		.version = 1,
-#if !TARGET_OS_DRIVERKIT
-		.dlopen = dlopen,
-		.dlsym = dlsym,
-#endif
+		.atfork_prepare_v2 = libSystem_atfork_prepare,
+		.atfork_parent_v2 = libSystem_atfork_parent,
+		.atfork_child_v2 = libSystem_atfork_child,
 	};
 	
 	_libSystem_ktrace0(ARIADNE_LIFECYCLE_libsystem_init | DBG_FUNC_START);
@@ -238,6 +269,10 @@ libSystem_initializer(int argc,
 	_dyld_initializer();
 	_libSystem_ktrace_init_func(DYLD);
 
+#if TARGET_OS_OSX
+	__pthread_late_init(envp, apple, vars);
+#endif
+
 	libdispatch_init();
 	_libSystem_ktrace_init_func(LIBDISPATCH);
 
@@ -245,7 +280,7 @@ libSystem_initializer(int argc,
 	_libxpc_initializer();
 	_libSystem_ktrace_init_func(LIBXPC);
 
-#if CURRENT_VARIANT_asan
+#if SUPPORT_ASAN
 	setenv("DT_BYPASS_LEAKS_CHECK", "1", 1);
 #endif
 #endif // !TARGET_OS_DRIVERKIT
@@ -269,7 +304,25 @@ libSystem_initializer(int argc,
 	_libSystem_ktrace_init_func(DARWIN);
 #endif // !TARGET_OS_DRIVERKIT
 
-	__stack_logging_early_finished(&malloc_funcs);
+
+#if TARGET_OS_DRIVERKIT
+	const struct _malloc_msl_symbols msl_symbols_buf = {};
+	const struct _malloc_msl_symbols *msl_symbols = fill_msl_symbols(&msl_symbols_buf);
+#endif
+
+	const struct _malloc_late_init mli = {
+		.version = 2,
+#if !TARGET_OS_DRIVERKIT
+		.dlopen = dlopen,
+		.dlsym = dlsym,
+		// this must come after _libxpc_initializer()
+		.internal_diagnostics = os_variant_has_internal_diagnostics("com.apple.libsystem"),
+#else
+		.msl = msl_symbols,
+#endif
+	};
+
+	__malloc_late_init(&mli);
 
 #if !TARGET_OS_IPHONE
 	/* <rdar://problem/22139800> - Preserve the old behavior of apple[] for
@@ -286,6 +339,7 @@ libSystem_initializer(int argc,
 #if TARGET_OS_OSX && !defined(__i386__)
 	bool enable_system_version_compat = false;
 	bool enable_ios_version_compat = false;
+	bool enable_posix_spawn_filtering = false;
 	char *system_version_compat_override = getenv("SYSTEM_VERSION_COMPAT");
 	if (system_version_compat_override != NULL) {
 		long override = strtol(system_version_compat_override, NULL, 0);
@@ -303,15 +357,25 @@ libSystem_initializer(int argc,
 	} else if (!dyld_program_sdk_at_least(dyld_platform_version_macOS_10_16)) {
 		enable_system_version_compat = true;
 	}
+	/* 
+	 * In launchd (pid 1), feature flags are not available here because the data
+	 * volume is not mounted yet. We'll query posix_spawn_filtering via the
+	 * libSystem_init_after_boot_tasks_4launchd call below instead.
+	 */
+	if (getpid() != 1 && os_feature_enabled(Libsystem, posix_spawn_filtering)) {
+		enable_posix_spawn_filtering = true;
+	}
 
-	if (enable_system_version_compat || enable_ios_version_compat) {
+	if (enable_system_version_compat || enable_ios_version_compat || enable_posix_spawn_filtering) {
 		struct _libkernel_late_init_config config = {
-			.version = 2,
+			.version = 3,
 			.enable_system_version_compat = enable_system_version_compat,
 			.enable_ios_version_compat = enable_ios_version_compat,
+			.enable_posix_spawn_filtering = enable_posix_spawn_filtering,
 		};
 		__libkernel_init_late(&config);
 	}
+#else // TARGET_OS_OSX && !defined(__i386__)
 #endif // TARGET_OS_OSX && !defined(__i386__)
 
 	_libSystem_ktrace0(ARIADNE_LIFECYCLE_libsystem_init | DBG_FUNC_END);
@@ -324,14 +388,33 @@ libSystem_initializer(int argc,
 	errno = 0;
 }
 
-/*
- * libSystem_atfork_{prepare,parent,child}() are called by libc during fork(2).
- */
+extern __attribute__((__visibility__("default")))
 void
-libSystem_atfork_prepare(void)
+libSystem_init_after_boot_tasks_4launchd()
 {
-	// first call client prepare handlers registered with pthread_atfork()
-	_pthread_atfork_prepare_handlers();
+#if TARGET_OS_OSX && !defined(__i386__)
+	if (os_feature_enabled(Libsystem, posix_spawn_filtering)) {
+		struct _libkernel_init_after_boot_tasks_config config = {
+			.version = 1,
+			.enable_posix_spawn_filtering = true,
+		};
+		__libkernel_init_after_boot_tasks(&config);
+	}
+#endif
+}
+
+/*
+ * libSystem_atfork_{prepare,parent,child}() are called by libc during fork(2)
+ * and vfork(2) now that vfork is just an alias for fork - but vfork doesn't
+ * call API pthread_atfork handlers, only the Libsystem-internal handlers.
+ */
+static void
+libSystem_atfork_prepare(unsigned int flags, ...)
+{
+	if ((flags & LIBSYSTEM_ATFORK_HANDLERS_ONLY_FLAG) == 0) {
+		// first call client prepare handlers registered with pthread_atfork()
+		_pthread_atfork_prepare_handlers();
+	}
 
 	// second call hardwired fork prepare handlers for Libsystem components
 	// in the _reverse_ order of library initalization above
@@ -346,8 +429,8 @@ libSystem_atfork_prepare(void)
 	_pthread_atfork_prepare();
 }
 
-void
-libSystem_atfork_parent(void)
+static void
+libSystem_atfork_parent(unsigned int flags, ...)
 {
 	// first call hardwired fork parent handlers for Libsystem components
 	// in the order of library initalization above
@@ -361,12 +444,14 @@ libSystem_atfork_parent(void)
 	_libSC_info_fork_parent();
 #endif // !TARGET_OS_DRIVERKIT
 
-	// second call client parent handlers registered with pthread_atfork()
-	_pthread_atfork_parent_handlers();
+	if ((flags & LIBSYSTEM_ATFORK_HANDLERS_ONLY_FLAG) == 0) {
+		// second call client parent handlers registered with pthread_atfork()
+		_pthread_atfork_parent_handlers();
+	}
 }
 
-void
-libSystem_atfork_child(void)
+static void
+libSystem_atfork_child(unsigned int flags, ...)
 {
 	// first call hardwired fork child handlers for Libsystem components
 	// in the order of library initalization above
@@ -390,28 +475,111 @@ libSystem_atfork_child(void)
 	_libSC_info_fork_child();
 #endif // !TARGET_OS_DRIVERKIT
 
-	// second call client parent handlers registered with pthread_atfork()
-	_pthread_atfork_child_handlers();
+	if ((flags & LIBSYSTEM_ATFORK_HANDLERS_ONLY_FLAG) == 0) {
+		// second call client child handlers registered with pthread_atfork()
+		_pthread_atfork_child_handlers();
+	}
 }
 
-#if CURRENT_VARIANT_asan
-#define DEFAULT_ASAN_OPTIONS "color=never" \
-	":handle_segv=0:handle_sigbus=0:handle_sigill=0:handle_sigfpe=0" \
-	":external_symbolizer_path=" \
-	":log_path=stderr:log_exe_name=0" \
-	":halt_on_error=0" \
-	":print_module_map=2" \
-	":start_deactivated=1" \
-	":detect_odr_violation=0"
+#if SUPPORT_ASAN
+
+// Prevents use of coloring terminal signals in report. These
+// hinder readability when writing to files or the system log.
+#define ASAN_OPT_NO_COLOR "color=never"
+
+// Disables ASan's signal handlers. It's better to let the system catch
+// these kinds of crashes.
+#define ASAN_OPT_NO_SIGNAL_HANDLERS ":handle_segv=0:handle_sigbus=0:handle_sigill=0:handle_sigfpe=0"
+
+// Disables using the out-of-process symbolizer (atos) but still allows
+// in-process symbolization via `dladdr()`. This gives useful function names
+// (unless they are redacted) which can be helpful in the event we can't
+// symbolize offline. Out-of-process symbolization isn't useful because
+// the dSYMs are usually not present on the device.
+#define ASAN_OPT_NO_OOP_SYMBOLIZER ":external_symbolizer_path="
+
+// Don't try to log to a file. It's difficult to find a location for the file
+// that is writable so just write to stderr.
+#define ASAN_OPT_FILE_LOG ":log_path=stderr:log_exe_name=0"
+
+// Print the module map when finding an issue. This is necessary for offline
+// symbolication.
+#define ASAN_OPT_MODULE_MAP ":print_module_map=2"
+
+// Disable ODR violation checking.
+// <rdar://problem/71021707> Investigate enabling ODR checking for ASan in BATS and in the `_asan` variant
+#define ASAN_OPT_NO_ODR_VIOLATION ":detect_odr_violation=0"
+
+// Start ASan in deactivated mode. This reduces memory overhead until
+// instrumented code is loaded. This prevents catching bugs if no instrumented
+// code is loaded.
+#define ASAN_OPT_START_DEACTIVATED ":start_deactivated=1"
+
+// Do not crash when an error is found. This always works for errors caught via
+// ASan's interceptors. This won't work for errors caught in ASan
+// instrumentation unless the code is compiled with
+// `-fsanitize-recover=address`.  If this option is being used then the ASan
+// reports can only be found by looking at the system log.
+#define ASAN_OPT_NO_HALT_ON_ERROR ":halt_on_error=0"
+
+// Crash when an error is found.
+#define ASAN_OPT_HALT_ON_ERROR ":halt_on_error=1"
+
+// ASan options common to all supported variants
+#define COMMON_ASAN_OPTIONS \
+  ASAN_OPT_NO_COLOR \
+  ASAN_OPT_NO_SIGNAL_HANDLERS \
+  ASAN_OPT_NO_OOP_SYMBOLIZER \
+  ASAN_OPT_FILE_LOG \
+  ASAN_OPT_MODULE_MAP \
+  ASAN_OPT_NO_ODR_VIOLATION
+
+#if defined(CURRENT_VARIANT_normal) || defined(CURRENT_VARIANT_debug) || defined (CURRENT_VARIANT_no_asan)
+
+// In the normal variant ASan will be running in all userspace processes ("whole userspace ASan").
+// This mode exists to support "ASan in BATS".
+//
+// Supporting ASan in the debug variant preserves existing behavior.
+//
+// The no_asan variant does not load the ASan runtime. However, the runtime
+// might still be loaded if a program or its dependencies are instrumented.
+// There is nothing we can do to prevent this so we should set the appropriate
+// ASan options (same as normal variant) if it does happen. We try to do this
+// here but this currently doesn't work due to rdar://problem/72212914.
+//
+// These variants use the following extra options:
+//
+// ASAN_OPT_NO_HALT_ON_ERROR - Try to avoid crash loops and increase the
+//                             chances of booting successfully.
+// ASAN_OPT_START_DEACTIVATED - Try to reduce memory overhead.
+
+# define DEFAULT_ASAN_OPTIONS \
+  COMMON_ASAN_OPTIONS \
+  ASAN_OPT_START_DEACTIVATED \
+  ASAN_OPT_NO_HALT_ON_ERROR
+
+#elif defined(CURRENT_VARIANT_asan)
+
+// The `_asan` variant is used to support running proceses with
+// `DYLD_IMAGE_SUFFIX=_asan`. This mode is typically used to target select parts of the OS.
+//
+// It uses the following extra options:
+//
+// ASAN_OPT_HALT_ON_ERROR - Crashing is better than just writing the error to the system log
+//                          if the system can handle this. This workflow is
+//                          more tolerant (e.g. `launchctl debug`) to crashing
+//                          than the "whole userspace ASan" workflow.
+
+# define DEFAULT_ASAN_OPTIONS \
+  COMMON_ASAN_OPTIONS \
+  ASAN_OPT_HALT_ON_ERROR
+
+#else
+# error Supporting ASan is not supported in the current variant
+#endif
+
 char dynamic_asan_opts[1024] = {0};
 const char *__asan_default_options(void) {
-	char executable_path[4096] = {0};
-	uint32_t size = sizeof(executable_path);
-	const char *process_name = "";
-	if (_NSGetExecutablePath(executable_path, &size) == 0) {
-		process_name = strrchr(executable_path, '/') + 1;
-	}
-
 	int fd = open("/System/Library/Preferences/com.apple.asan.options", O_RDONLY);
 	if (fd != -1) {
 		ssize_t remaining_size = sizeof(dynamic_asan_opts) - 1;
@@ -430,6 +598,20 @@ const char *__asan_default_options(void) {
 
 	return DEFAULT_ASAN_OPTIONS;
 }
+
+#undef ASAN_OPT_NO_COLOR
+#undef ASAN_OPT_NO_SIGNAL_HANDLERS
+#undef ASAN_OPT_NO_OOP_SYMBOLIZER
+#undef ASAN_OPT_FILE_LOG
+#undef ASAN_OPT_MODULE_MAP
+#undef ASAN_OPT_NO_ODR_VIOLATION
+#undef ASAN_OPT_START_DEACTIVATED
+#undef ASAN_OPT_NO_HALT_ON_ERROR
+#undef ASAN_OPT_HALT_ON_ERROR
+
+#undef COMMON_ASAN_OPTIONS
+#undef DEFAULT_ASAN_OPTIONS
+
 #endif
 
 /*
