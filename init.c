@@ -27,10 +27,10 @@
  */
 
 #include <TargetConditionals.h>	// for TARGET_OS_*
+#include <stddef.h>
 
 #if !TARGET_OS_EXCLAVEKIT
 
-#include <stddef.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <corecrypto/cc_priv.h>
@@ -70,6 +70,7 @@ extern void mach_init(void);			// from libsystem_kernel.dylib
 extern void __libplatform_init(void *future_use, const char *envp[], const char *apple[], const struct ProgramVars *vars);
 extern void __pthread_init(const struct _libpthread_functions *libpthread_funcs, const char *envp[], const char *apple[], const struct ProgramVars *vars);	// from libsystem_pthread.dylib
 extern void __pthread_late_init(const char *envp[], const char *apple[], const struct ProgramVars *vars);	// from libsystem_pthread.dylib
+extern void _sanitizers_init(const char *envp[], const char *apple[]); // from libsanitizers.dylib
 extern void __malloc_init(const char *apple[]); // from libsystem_malloc.dylib
 extern void _dyld_initializer(void);		// from libdyld.dylib
 extern void libdispatch_init(void);		// from libdispatch.dylib
@@ -133,6 +134,12 @@ static inline void __end_prewarm(const char* envp[]);
 
 __attribute__((__visibility__("default"))) void libSystem_init_after_boot_tasks_4launchd(void);
 
+// should_enable_posix_spawn_filtering can only be used after
+// _libxpc_initializer() has run
+#define should_enable_posix_spawn_filtering() \
+	(os_variant_has_internal_content("com.apple.libsystem") && \
+	os_feature_enabled(Libsystem, posix_spawn_filtering))
+
 #if SUPPORT_ASAN
 const char *__asan_default_options(void);
 #endif
@@ -179,6 +186,7 @@ enum init_func {
 	INIT_SECINIT = 11,
 	INIT_CONTAINERMGR = 12,
 	INIT_DARWIN = 13,
+	INIT_SANITIZERS = 14,
 };
 
 #define _libSystem_ktrace_init_func(what) \
@@ -278,6 +286,11 @@ libSystem_initializer(int argc,
 	_libc_initializer(&libc_funcs, envp, apple, vars);
 	_libSystem_ktrace_init_func(LIBC);
 
+#if !TARGET_OS_DRIVERKIT
+	_sanitizers_init(envp, apple);
+	_libSystem_ktrace_init_func(SANITIZERS);
+#endif
+
 	// TODO: Move __malloc_init before __libc_init after breaking malloc's upward link to Libc
 	// Note that __malloc_init() will also initialize ASAN when it is present
 	__malloc_init(apple);
@@ -286,7 +299,7 @@ libSystem_initializer(int argc,
 	_dyld_initializer();
 	_libSystem_ktrace_init_func(DYLD);
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX || TARGET_OS_IOS
 	__pthread_late_init(envp, apple, vars);
 #endif
 
@@ -385,7 +398,7 @@ libSystem_initializer(int argc,
 	 * volume is not mounted yet. We'll query posix_spawn_filtering via the
 	 * libSystem_init_after_boot_tasks_4launchd call below instead.
 	 */
-	if (getpid() != 1 && os_feature_enabled(Libsystem, posix_spawn_filtering)) {
+	if (getpid() != 1 && should_enable_posix_spawn_filtering()) {
 		enable_posix_spawn_filtering = true;
 	}
 #endif // POSIX_SPAWN_FILTERING_ENABLED
@@ -420,7 +433,7 @@ void
 libSystem_init_after_boot_tasks_4launchd()
 {
 #if POSIX_SPAWN_FILTERING_ENABLED
-	if (os_feature_enabled(Libsystem, posix_spawn_filtering)) {
+	if (should_enable_posix_spawn_filtering()) {
 		struct _libkernel_init_after_boot_tasks_config config = {
 			.version = 1,
 			.enable_posix_spawn_filtering = true,
@@ -716,6 +729,9 @@ asm (".desc __crashreporter_info__, 0x10");
 
 #else // TARGET_OS_EXCLAVEKIT
 
+#include <malloc/malloc.h>
+#include <malloc_implementation.h>
+
 struct ProgramVars; // forward reference
 
 extern void __liblibc_plat_init(int argc, const char* argv[], const char *envp[], const char *apple[], const struct ProgramVars *vars);
@@ -732,12 +748,19 @@ libSystem_initializer(int argc,
                       const char* apple[],
                       const struct ProgramVars* vars)
 {
-	// First, initialize liblibc_plat.dylib: We pass it all the args that dyld has passed to us.
+	// Initialize liblibc_plat.dylib: We pass it all the args that dyld has passed to us.
 	__liblibc_plat_init(argc, argv, envp, apple, vars);
-	
+
+	// Initialize malloc zones.
+	/* Temp. hack */
+	/* We need to check if malloc was already initialized by the platform code */
+	if (malloc_default_zone() == NULL) {	
+		__malloc_init(NULL);
+	}
+
 	// Initialize libdyld.dylib.
 	_dyld_initializer();
-	
+
 	// Initialize libobjc.dylib. Note that this is an upward-link call.
 	// We currently don't have a good way of avoiding this in processes that don't use Objective-C.
 	_objc_init();
